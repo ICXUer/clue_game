@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>剧本杀离线线索抽取器</title>
+<style>
+*{box-sizing:border-box;font-family:system-ui, sans-serif;}
+body{max-width:700px;margin:10px auto;padding:10px;background:#fff;font-size:15px;}
+.card{border:1px solid #ccc;border-radius:8px;padding:10px;margin:8px 0;}
+.card.selected{background:#e8f4ff;border-color:#2b7cd3;}
+img{max-width:240px;max-height:220px;border-radius:4px;}
+button{padding:8px 12px;margin:4px;border:none;border-radius:6px;background:#2b7cd3;color:#fff;font-size:14px;}
+button.danger{background:#dc3545;}
+button.gray{background:#888;}
+textarea,input,select{width:100%;padding:8px;margin:4px 0;border:1px solid #aaa;border-radius:4px;font-size:15px;}
+.section{margin:16px 0;padding:12px;border:1px solid #ddd;border-radius:8px;}
+.tip{color:#666;font-size:14px;}
+.belong-tag{display:inline-block;background:#f0f0f0;padding:3px 6px;border-radius:4px;font-size:13px;margin:2px;}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const STORAGE_KEY = "clue_game_data";
+let data = loadData();
+let viewMode = "switch"; // switch / dm / player
+let currentRole = "";
+let currentEditRoundId = null;
+
+function uuid(){
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+function loadData(){
+  const raw = localStorage.getItem(STORAGE_KEY);
+  if(raw) return JSON.parse(raw);
+  return {
+    roles:[],
+    rounds:{},
+    clues:{},
+    draw_log:{},
+    dm_public_pool:[]
+  }
+}
+function saveData(){
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+}
+
+function render(){
+  const app = document.getElementById("app");
+  if(viewMode === "switch"){
+    app.innerHTML = `
+      <h2>剧本杀线索工具（离线版）</h2>
+      <div class="section">
+        <p>选择身份进入</p>
+        <button onclick="switchView('dm')">DM主持人后台</button>
+        <button onclick="switchView('player')">玩家界面</button>
+      </div>
+      <p class="tip">✅ 完全离线，不需要WiFi/流量；数据保存在本机浏览器</p>
+    `;
+    return;
+  }
+  if(viewMode === "dm"){
+    renderDM();
+    return;
+  }
+  if(viewMode === "player"){
+    renderPlayer();
+    return;
+  }
+}
+function switchView(mode){
+  viewMode = mode;
+  render();
+}
+
+// ========== DM面板 ==========
+function renderDM(){
+  let html = `<h2>DM后台管理</h2>
+  <button onclick="switchView('switch')">返回身份选择</button>
+  <div class="section">
+    <h3>1.角色管理</h3>
+    <input id="newRoleInput" placeholder="输入角色名">
+    <button onclick="addRole()">添加角色</button>
+    <div>`;
+  for(const r of data.roles){
+    html += `<span>${r}</span> <button class="danger" onclick="delRole('${r}')">删除</button> `;
+  }
+  html += `</div></div>
+
+  <div class="section">
+    <h3>2.新建轮次</h3>
+    <input id="roundIdInput" placeholder="轮次编号，如1、2">
+    <input id="roundDrawLimitInput" type="number" placeholder="本轮每人最多抽几张" value="2">
+    <button onclick="addRound()">新建轮次</button>
+    <h4>轮次列表</h4>`;
+  for(const rid in data.rounds){
+    const r = data.rounds[rid];
+    html += `<div class="card">
+      第${rid}轮｜每人上限${r.per_person_draw}张｜${r.open ? "✅已开启" : "❌关闭"}
+      <button onclick="toggleRound('${rid}')">开启/关闭</button>
+      <button onclick="editRoundPool('${rid}')">配置本轮线索池</button>
+      <button class="danger" onclick="delRound('${rid}')">删除轮次</button>
+    </div>`;
+  }
+  html += `</div>`;
+
+  if(currentEditRoundId){
+    const rid = currentEditRoundId;
+    const pool = data.rounds[rid].pool || [];
+    html += `<div class="section">
+      <h3>配置【第${rid}轮】线索池（点击卡片勾选）</h3>
+      <p>已勾选：${pool.length} 条</p>`;
+    for(const cid in data.clues){
+      const c = data.clues[cid];
+      const checked = pool.includes(cid);
+      html += `<div class="card ${checked?'selected':''}" onclick="togglePoolItem('${rid}','${cid}')">
+        <span class="belong-tag">${c.belong_type==='role'?'角色':'地点'}：${c.belong_name}</span>
+        ${c.img?`<img src="${c.img}">`:''}
+        <p>${c.desc}</p>
+        <p class="tip">${c.can_public?"✅允许申请公开":"❌禁止公开"}</p>
+      </div>`;
+    }
+    html += `<button onclick="currentEditRoundId=null;render()">保存并关闭</button></div>`;
+  }
+
+  html += `
+  <div class="section">
+    <h3>3.录入新证据线索</h3>
+    <select id="belongType">
+      <option value="role">角色</option>
+      <option value="location">地点</option>
+    </select>
+    <input id="belongName" placeholder="填写归属名称，如 张三 / 书房">
+    <textarea id="clueDesc" placeholder="线索文字描述"></textarea>
+    <label><input type="checkbox" id="canPublicCheck" checked>允许玩家申请公开</label>
+    <br>
+    <input type="file" id="imgUpload" accept="image/*">
+    <button onclick="uploadClue()">添加线索</button>
+  </div>
+
+  <div class="section">
+    <h3>全部线索库</h3>`;
+  for(const cid in data.clues){
+    const c = data.clues[cid];
+    html += `<div class="card">
+      <span class="belong-tag">${c.belong_type==='role'?'角色':'地点'}：${c.belong_name}</span>
+      ${c.img?`<img src="${c.img}">`:''}
+      <p>${c.desc}</p>
+      <p class="tip">${c.can_public?"✅允许申请公开":"❌禁止公开"}</p>
+      <button class="danger" onclick="delClue('${cid}')">删除这条线索</button>
+    </div>`;
+  }
+  html += `</div>
+
+  <div class="section">
+    <h3>4.公共线索池（DM手动管理）</h3>`;
+  for(const cid of data.dm_public_pool){
+    const c = data.clues[cid];
+    if(!c) continue;
+    html += `<div class="card">
+      <span class="belong-tag">${c.belong_type==='role'?'角色':'地点'}：${c.belong_name}</span>
+      ${c.img?`<img src="${c.img}">`:''}
+      <p>${c.desc}</p>
+      <button class="danger" onclick="removePublic('${cid}')">从公共池撤回</button>
+    </div>`;
+  }
+  html += `<p class="tip">玩家申请公开后，你在这里手动加入公共池</p></div>
+
+  <div class="section">
+    <h3>5.本局重置</h3>
+    <button class="danger" onclick="resetGame()">重置本局（清空抽取记录+公共线索，保留线索素材、轮次、角色）</button>
+  </div>`;
+  app.innerHTML = html;
+}
+
+function addRole(){
+  const el = document.getElementById("newRoleInput");
+  const name = el.value.trim();
+  if(!name || data.roles.includes(name)) return alert("角色名不能为空或重复");
+  data.roles.push(name);
+  saveData(); render();
+}
+function delRole(name){
+  if(!confirm("确定删除？")) return;
+  data.roles = data.roles.filter(x=>x!==name);
+  saveData(); render();
+}
+function addRound(){
+  const rid = document.getElementById("roundIdInput").value.trim();
+  const limit = Number(document.getElementById("roundDrawLimitInput").value);
+  if(!rid || !limit) return alert("轮次编号和抽取上限必填");
+  data.rounds[rid] = {open:false, per_person_draw:limit, pool:[]};
+  saveData(); render();
+}
+function toggleRound(rid){
+  data.rounds[rid].open = !data.rounds[rid].open;
+  saveData(); render();
+}
+function delRound(rid){
+  if(!confirm("确定删除该轮次？")) return;
+  delete data.rounds[rid];
+  saveData(); render();
+}
+function editRoundPool(rid){
+  currentEditRoundId = rid;
+  render();
+}
+function togglePoolItem(rid, cid){
+  const pool = data.rounds[rid].pool || [];
+  const idx = pool.indexOf(cid);
+  if(idx>=0) pool.splice(idx,1);
+  else pool.push(cid);
+  data.rounds[rid].pool = pool;
+  saveData(); render();
+}
+function uploadClue(){
+  const type = document.getElementById("belongType").value;
+  const bname = document.getElementById("belongName").value.trim();
+  const desc = document.getElementById("clueDesc").value.trim();
+  const canPub = document.getElementById("canPublicCheck").checked;
+  const file = document.getElementById("imgUpload").files[0];
+  if(!bname || !desc) return alert("归属名称、线索描述必填");
+  const cid = uuid();
+  const reader = new FileReader();
+  reader.onload = function(e){
+    data.clues[cid] = {
+      belong_type: type,
+      belong_name: bname,
+      desc: desc,
+      img: e.target.result,
+      can_public: canPub
+    };
+    saveData(); render();
+  }
+  if(file) reader.readAsDataURL(file);
+  else {
+    data.clues[cid] = {belong_type:type, belong_name:bname, desc, img:"", can_public:canPub};
+    saveData(); render();
+  }
+}
+function delClue(cid){
+  if(!confirm("删除这条线索？")) return;
+  delete data.clues[cid];
+  // 从所有轮次池移除
+  for(const r in data.rounds){
+    const p = data.rounds[r].pool;
+    const i = p.indexOf(cid);
+    if(i>=0) p.splice(i,1);
+  }
+  const pi = data.dm_public_pool.indexOf(cid);
+  if(pi>=0) data.dm_public_pool.splice(pi,1);
+  saveData(); render();
+}
+function removePublic(cid){
+  const i = data.dm_public_pool.indexOf(cid);
+  if(i>=0) data.dm_public_pool.splice(i,1);
+  saveData(); render();
+}
+function resetGame(){
+  if(!confirm("确认重置本局？清空所有抽取记录、公共线索！线索素材、轮次、角色保留")) return;
+  data.draw_log = {};
+  data.dm_public_pool = [];
+  saveData(); render();
+}
+
+// ========== 玩家面板 ==========
+function renderPlayer(){
+  let html = `<h2>玩家界面</h2>
+  <button onclick="switchView('switch')">返回身份选择</button>`;
+  if(!currentRole){
+    html += `<div class="section">
+      <p>选择你的角色</p>
+      <select id="roleSelect">`;
+    for(const r of data.roles) html += `<option value="${r}">${r}</option>`;
+    html += `</select>
+      <button onclick="setRole()">确认进入</button>
+    </div>`;
+  }else{
+    html += `<div class="section"><h3>你：${currentRole}</h3>
+    <button onclick="currentRole='';render()">切换角色</button>
+    </div>
+
+    <div class="section">
+      <h3>【公共线索】 <button onclick="alert('请找DM同步最新公共线索，本页面只是本地副本！')">刷新公共线索（口头同步）</button></h3>`;
+    for(const cid of data.dm_public_pool){
+      const c = data.clues[cid];
+      if(!c) continue;
+      html += `<div class="card">
+        <span class="belong-tag">${c.belong_type==='role'?'角色':'地点'}：${c.belong_name}</span>
+        ${c.img?`<img src="${c.img}">`:''}
+        <p>${c.desc}</p>
+      </div>`;
+    }
+    html += `</div>
+
+    <div class="section"><h3>【本轮搜证抽取区】</h3>`;
+    const myDraw = data.draw_log[currentRole] || {};
+    for(const rid in data.rounds){
+      const r = data.rounds[rid];
+      if(!r.open) continue;
+      const pool = r.pool || [];
+      const drawnIds = myDraw[rid] || [];
+      const left = r.per_person_draw - drawnIds.length;
+      html += `<div class="card">
+        <h4>第${rid}轮｜上限${r.per_person_draw}，你已抽${drawnIds.length}，剩余${left}</h4>`;
+      if(left>0){
+        html += `<button onclick="drawClue('${rid}')">抽取一张线索</button>`;
+      }else{
+        html += `<p class="tip">本轮抽取次数用完</p>`;
+      }
+      html += `</div>`;
+    }
+    html += `</div>
+
+    <div class="section">
+      <h3>✅【我的全部证据（永久保留）】</h3>`;
+    const allMyClueIds = new Set();
+    for(const rid in myDraw){
+      for(const cid of myDraw[rid]) allMyClueIds.add(cid);
+    }
+    for(const cid of allMyClueIds){
+      const c = data.clues[cid];
+      if(!c) continue;
+      html += `<div class="card">
+        <span class="belong-tag">${c.belong_type==='role'?'角色':'地点'}：${c.belong_name}</span>
+        ${c.img?`<img src="${c.img}">`:''}
+        <p>${c.desc}</p>`;
+      if(c.can_public){
+        html += `<button onclick="alert('请口头告诉DM：我申请公开这条线索！等待DM在后台加入公共池')">申请公开</button>`;
+      }
+      html += `</div>`;
+    }
+    html += `</div>`;
+  }
+  app.innerHTML = html;
+}
+function setRole(){
+  const sel = document.getElementById("roleSelect");
+  currentRole = sel.value;
+  render();
+}
+function drawClue(rid){
+  const r = data.rounds[rid];
+  if(!r.open) return alert("轮次未开启");
+  const pool = r.pool || [];
+  if(!pool.length) return alert("本轮线索池为空，请DM先配置线索池");
+  if(!data.draw_log[currentRole]) data.draw_log[currentRole] = {};
+  const drawn = data.draw_log[currentRole][rid] || [];
+  if(drawn.length >= r.per_person_draw) return alert("本轮抽取次数用完");
+  // 从池里随机挑一条还没被自己本轮抽到的
+  const avail = pool.filter(cid=>!drawn.includes(cid));
+  if(!avail.length) return alert("本轮你能抽的线索已经抽完");
+  const pick = avail[Math.floor(Math.random()*avail.length)];
+  drawn.push(pick);
+  data.draw_log[currentRole][rid] = drawn;
+  saveData(); render();
+}
+
+render();
+</script>
+</body>
+</html>
